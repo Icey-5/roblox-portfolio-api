@@ -78,7 +78,7 @@ app.get("/portfolio/:userId", async (req, res) => {
 
 // Test route
 app.get("/", (req, res) => {
-    res.send("Server is alive! Use /portfolio/:userId");
+    res.send("Server is live! Use /portfolio/:userId");
 });
 
 const PORT = process.env.PORT || 8080;
