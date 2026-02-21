@@ -1,153 +1,163 @@
+// index.js
 const express = require("express");
 const axios = require("axios");
 const cors = require("cors");
 
 const app = express();
-const PORT = process.env.PORT || 8080;
-
 app.use(cors());
 app.use(express.json());
 
+// Cloud Run expects this port
+const PORT = process.env.PORT || 8080;
+
+// Delay function for rate limiting
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Roblox API key (needed for some endpoints)
-const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
+// Roblox API helper
+async function fetchJSON(url, headers = {}) {
+  const res = await axios.get(url, { headers });
+  return res.data;
+}
 
 // Get userId from username
 async function getUserId(username) {
   const res = await axios.post("https://users.roblox.com/v1/usernames/users", {
     usernames: [username],
-    excludeBannedUsers: false
+    excludeBannedUsers: false,
   });
   const user = res.data.data[0];
   if (user && user.id) return user.id;
   throw new Error("User not found");
 }
 
-// Get universeId from placeId using Open Cloud API
-async function getUniverseIdFromPlaceId(placeId) {
+// Get groups where user is owner
+async function getOwnedGroups(userId) {
   try {
-    const res = await axios.get(
-      `https://apis.roblox.com/universes/v1/places/${placeId}/universe`,
-      {
-        headers: { "x-api-key": ROBLOX_API_KEY }
-      }
-    );
-    return res.data.universeId;
+    const url = `https://groups.roblox.com/v1/users/${userId}/groups/roles`;
+    const data = await fetchJSON(url);
+    return data.data.filter(g => g.role.rank === 255).map(g => g.group.id);
   } catch (err) {
-    console.warn(`Failed to get universeId for place ${placeId}: ${err.message}`);
-    return null;
+    console.error(`Failed to fetch groups for ${userId}:`, err.message);
+    return [];
   }
 }
 
-// Fetch user games (paged)
+// Fetch all games for user or group, paginated
 async function fetchGames(ownerType, ownerId) {
-  let games = [];
   let cursor = "";
+  let games = [];
   let hasMore = true;
 
   while (hasMore) {
     try {
       const url = `https://games.roblox.com/v2/${ownerType}/${ownerId}/games?sortOrder=Asc&limit=50${cursor ? `&cursor=${cursor}` : ""}`;
-      const res = await axios.get(url);
-      if (res.data.data && res.data.data.length) games.push(...res.data.data);
-      cursor = res.data.nextPageCursor;
-      if (!cursor) hasMore = false;
+      const data = await fetchJSON(url);
+
+      if (data.data?.length) {
+        games.push(...data.data);
+      }
+
+      if (data.nextPageCursor) {
+        cursor = data.nextPageCursor;
+      } else {
+        hasMore = false;
+      }
     } catch (err) {
-      console.error(`Failed to fetch games for ${ownerType} ${ownerId}: ${err.message}`);
+      console.error(`Failed to fetch games for ${ownerType} ${ownerId}:`, err.message);
       hasMore = false;
     }
   }
-
   return games;
 }
 
-// Fetch groups where user is owner
-async function fetchOwnedGroups(userId) {
-  try {
-    const url = `https://groups.roblox.com/v1/users/${userId}/groups/roles`;
-    const res = await axios.get(url);
-    return (res.data.data || [])
-      .filter(g => g.role.rank === 255)
-      .map(g => g.group.id);
-  } catch (err) {
-    console.error(`Failed to fetch groups for user ${userId}: ${err.message}`);
-    return [];
-  }
-}
-
-// Fetch game details by universeId
-async function fetchGameDetails(universeIds) {
-  if (!universeIds.length) return [];
-  const url = `https://games.roblox.com/v1/games?universeIds=${universeIds.join(",")}`;
-  const res = await axios.get(url);
-  return res.data.data || [];
-}
-
-// Fetch game thumbnails
-async function fetchThumbnails(universeIds) {
-  if (!universeIds.length) return [];
-  const url = `https://thumbnails.roblox.com/v1/games/icons?universeIds=${universeIds.join(",")}&size=512x512&format=Png&isCircular=false`;
-  const res = await axios.get(url);
-  return res.data.data || [];
-}
-
-// Main portfolio API
-app.get("/portfolio/:username", async (req, res) => {
-  try {
-    const username = req.params.username;
-    const userId = await getUserId(username);
-
-    // 1️⃣ User games
-    const userGames = await fetchGames("users", userId);
-
-    // 2️⃣ Owned groups
-    const ownedGroups = await fetchOwnedGroups(userId);
-
-    // 3️⃣ Group games
-    let groupGames = [];
-    for (const groupId of ownedGroups) {
-      const gGames = await fetchGames("groups", groupId);
-      groupGames.push(...gGames);
-      await sleep(200); // prevent rate limits
+// Get universe stats: visits, likes, dislikes
+async function enrichGames(games) {
+  const enriched = [];
+  for (const game of games) {
+    let universeId = game.universeId || null;
+    if (!universeId) {
+      // fetch universeId if missing
+      try {
+        const res = await fetchJSON(`https://apis.roblox.com/universes/v1/places/${game.id}/universe`);
+        universeId = res.universeId;
+      } catch (err) {
+        console.warn(`Failed to fetch universeId for place ${game.id}: ${err.message}`);
+      }
     }
 
-    // Merge all games
-    const allGamesRaw = [...userGames, ...groupGames];
+    let visits = "N/A";
+    let likes = "N/A";
+    let dislikes = "N/A";
+    let isActive = game.isActive ?? true;
 
-    // Map universeIds
-    const universeIds = allGamesRaw.map(g => g.universeId || g.id);
+    if (universeId) {
+      try {
+        const statsRes = await fetchJSON(`https://games.roblox.com/v1/games?universeIds=${universeId}`);
+        const stats = statsRes.data?.[0];
+        if (stats) {
+          visits = stats.visits ?? "N/A";
+          likes = stats.voteCount?.upVotes ?? "N/A";
+          dislikes = stats.voteCount?.downVotes ?? "N/A";
+          isActive = stats.isActive ?? true;
+        }
+        await sleep(250); // avoid rate limits
+      } catch (err) {
+        console.warn(`Failed to fetch stats for universe ${universeId}: ${err.message}`);
+      }
+    }
 
-    // Fetch details and thumbnails
-    const details = await fetchGameDetails(universeIds);
-    const thumbnails = await fetchThumbnails(universeIds);
-
-    // Build final enriched array
-    const finalGames = details.map(game => {
-      const thumb = thumbnails.find(t => t.targetId === game.id);
-      return {
-        id: game.id,
-        name: game.name,
-        creator: game.creator.name,
-        playing: game.playing,
-        visits: game.visits,
-        description: game.description || "No description provided",
-        icon: thumb ? thumb.imageUrl : null
-      };
+    enriched.push({
+      name: game.name,
+      placeId: game.id,
+      universeId: universeId || "N/A",
+      visits,
+      likes,
+      dislikes,
+      thumbnail: `https://thumbnails.roblox.com/v1/places/${game.id}/thumbnail?size=768x432&format=png`,
+      created: game.created,
+      isArchived: game.isArchived,
+      isActive
     });
-
-    res.json({ userId, games: finalGames });
-  } catch (err) {
-    console.error("Portfolio API error:", err.message);
-    res.status(500).json({ error: "Failed to fetch portfolio data." });
   }
-});
+  return enriched;
+}
 
-// Test route
+// Root route
 app.get("/", (req, res) => {
   res.send("Server is alive! Use /portfolio/:username");
 });
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+// Portfolio route
+app.get("/portfolio/:username", async (req, res) => {
+  try {
+    const username = req.params.username;
+    if (!username) return res.status(400).json({ error: "Username required" });
+
+    const userId = await getUserId(username);
+
+    // 1️⃣ Fetch user's own games
+    let allGames = await fetchGames("users", userId);
+
+    // 2️⃣ Fetch owned groups and their games
+    const groups = await getOwnedGroups(userId);
+    for (const groupId of groups) {
+      const groupGames = await fetchGames("groups", groupId);
+      allGames.push(...groupGames);
+    }
+
+    // 3️⃣ Enrich all games with stats
+    const enrichedGames = await enrichGames(allGames);
+
+    res.json({ userId, username, totalGames: enrichedGames.length, games: enrichedGames });
+  } catch (err) {
+    console.error("Error in /portfolio/:username:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+});
