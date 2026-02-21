@@ -1,16 +1,12 @@
 {
-  "name": "roblox-portfolio-api",
+  "name": "roblox-full-api",
   "version": "1.0.0",
-  "description": "Roblox portfolio API for games, thumbnails, and stats",
-  "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "node-fetch": "^2.6.12"
-  },
-  "engines": {
-    "node": "18.x"
+    "node-fetch": "^3.3.2"
   }
 }
